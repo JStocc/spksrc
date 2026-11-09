@@ -99,9 +99,9 @@ jobs:
           mkdir -p distrib && cp "$f" distrib/
 
           spk_vers=$(echo "$V" | sed 's/p/./')          # 10.6p2 -> 10.6.2
-          old_vers=$(sed -nE 's/^SPK_VERS = (.*)$/\1/p' spk/openssh/Makefile)
           old_rev=$(sed -nE 's/^SPK_REV = (.*)$/\1/p' spk/openssh/Makefile)
-          if [ "$spk_vers" = "$old_vers" ]; then rev=$((old_rev + 1)); else rev=1; fi
+          # spksrc rule: SPK_REV is never reset, it always increments
+          rev=$((old_rev + 1))
           sed -i -E "s/^SPK_VERS = .*/SPK_VERS = ${spk_vers}/; s/^SPK_REV = .*/SPK_REV = ${rev}/" spk/openssh/Makefile
           sed -i -E "s|^CHANGELOG = .*|CHANGELOG = \"1. Update to OpenSSH ${V}.\"|" spk/openssh/Makefile
           echo "SPK_FULL=${spk_vers}-${rev}" >> "$GITHUB_ENV"
@@ -127,7 +127,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add cross/openssh/Makefile cross/openssh/digests spk/openssh/Makefile
-          git commit -m "openssh: update to ${V} (spk ${SPK_FULL})" || echo "nothing to commit"
+          git commit -m "OpenSSH (standalone): Update to ${V} (spk ${SPK_FULL})" || echo "nothing to commit"
           git push
 
       - name: Publish GitHub Release
