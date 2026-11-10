@@ -26,6 +26,8 @@ SSHD=${TARGET}/sbin/sshd
 KEYGEN=${TARGET}/bin/ssh-keygen
 PRIVSEP_DIR=${TARGET}/var/empty
 PIDFILE=/var/run/openssh-spk.pid
+# Privilege separation account, compiled in (--with-privsep-user), created by DSM for the package
+PRIVSEP_USER=sc-openssh
 
 log() { echo "openssh-ctl: $*"; logger -t openssh-ctl -- "$*" 2>/dev/null || true; }
 die() { log "ERROR: $*"; exit 1; }
@@ -85,7 +87,7 @@ prepare() {
     chown root:root "${PRIVSEP_DIR}"
     chmod 755 "${PRIVSEP_DIR}"
 
-    id sshd >/dev/null 2>&1 || die "system user 'sshd' (privilege separation) not found"
+    id "${PRIVSEP_USER}" >/dev/null 2>&1 || die "account '${PRIVSEP_USER}' (privilege separation) not found - reinstall the package"
 }
 
 check() {
