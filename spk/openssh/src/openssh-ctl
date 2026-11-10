@@ -1,0 +1,170 @@
+#!/bin/sh
+# openssh-ctl - control the standalone OpenSSH server (openssh-spk) on DSM 7
+#
+# Must run as root (DSM Task Scheduler task with user "root", or sudo).
+# Never touches the native DSM SSH service, /usr/bin/sshd, /etc/ssh or /etc/pam.d.
+#
+# Usage: openssh-ctl {start|stop|restart|reload|ensure|status|check|version}
+#   start    validate configuration, then start sshd
+#   stop     stop the listener (open sessions are kept)
+#   restart  stop + start
+#   reload   validate, then SIGHUP: sshd re-executes itself (new binary/config),
+#            open sessions are kept
+#   ensure   start if not running; reload if the running binary was replaced
+#            by a package upgrade. Meant for a periodic Task Scheduler task.
+#   status   print state, exit 0 if running
+#   check    validate configuration only (sshd -t)
+#   version  print OpenSSH version
+
+PKG=openssh
+TARGET=/var/packages/${PKG}/target
+PKGVAR=/var/packages/${PKG}/var
+ETC=${PKGVAR}/etc
+CONF=${ETC}/sshd_config
+TEMPLATE=${TARGET}/share/openssh-spk/sshd_config.default
+SSHD=${TARGET}/sbin/sshd
+KEYGEN=${TARGET}/bin/ssh-keygen
+PRIVSEP_DIR=${TARGET}/var/empty
+PIDFILE=/var/run/openssh-spk.pid
+
+log() { echo "openssh-ctl: $*"; logger -t openssh-ctl -- "$*" 2>/dev/null || true; }
+die() { log "ERROR: $*"; exit 1; }
+
+require_root() {
+    [ "$(id -u)" = "0" ] || die "must be run as root (Task Scheduler as root, or sudo)"
+}
+
+require_package() {
+    [ -x "${SSHD}" ] || die "package not installed or incomplete (${SSHD} missing)"
+}
+
+get_pid() {
+    [ -f "${PIDFILE}" ] || return 1
+    _pid=$(cat "${PIDFILE}" 2>/dev/null)
+    [ -n "${_pid}" ] || return 1
+    kill -0 "${_pid}" 2>/dev/null || return 1
+    # Make sure this pid really is our sshd (and not a recycled pid / the native one)
+    case "$(readlink "/proc/${_pid}/exe" 2>/dev/null)" in
+        "${SSHD}"|"${SSHD} (deleted)"|/volume*/@appstore/${PKG}/sbin/sshd*) ;;
+        *) return 1 ;;
+    esac
+    echo "${_pid}"
+}
+
+prepare() {
+    # Configuration and host keys: root-owned, outside the package target
+    # (target/ is replaced on every package upgrade, var/ is kept).
+    [ -d "${PKGVAR}" ] || die "${PKGVAR} missing - is the package installed?"
+    mkdir -p "${ETC}" || die "cannot create ${ETC}"
+    chown root:root "${ETC}"
+    chmod 700 "${ETC}"
+
+    if [ ! -f "${CONF}" ]; then
+        cp "${TEMPLATE}" "${CONF}" || die "cannot create ${CONF}"
+        log "created default configuration ${CONF} (port 2222, keys only)"
+    fi
+    chown root:root "${CONF}"
+    chmod 600 "${CONF}"
+
+    for _type in ed25519 rsa; do
+        _key="${ETC}/ssh_host_${_type}_key"
+        if [ ! -f "${_key}" ]; then
+            case "${_type}" in
+                rsa) "${KEYGEN}" -q -t rsa -b 4096 -N "" -f "${_key}" ;;
+                *)   "${KEYGEN}" -q -t "${_type}" -N "" -f "${_key}" ;;
+            esac || die "host key generation failed (${_type})"
+            log "generated host key ${_key}"
+        fi
+        chown root:root "${_key}" "${_key}.pub"
+        chmod 600 "${_key}"
+        chmod 644 "${_key}.pub"
+    done
+
+    # Privilege separation directory: must exist, be owned by root, not writable by others.
+    mkdir -p "${PRIVSEP_DIR}"
+    chown root:root "${PRIVSEP_DIR}"
+    chmod 755 "${PRIVSEP_DIR}"
+
+    id sshd >/dev/null 2>&1 || die "system user 'sshd' (privilege separation) not found"
+}
+
+check() {
+    "${SSHD}" -t -f "${CONF}" || die "configuration test failed: ${CONF} (nothing changed)"
+}
+
+do_start() {
+    if _pid=$(get_pid); then
+        log "already running (pid ${_pid})"
+        return 0
+    fi
+    prepare
+    check
+    # Absolute path is mandatory: sshd re-executes itself and sshd-session by path.
+    "${SSHD}" -f "${CONF}" || die "sshd failed to start"
+    sleep 1
+    _pid=$(get_pid) || die "sshd exited right after start - see Log Center / /var/log/messages"
+    log "started (pid ${_pid}) - $("${SSHD}" -V 2>&1 | head -n1)"
+}
+
+do_stop() {
+    if ! _pid=$(get_pid); then
+        log "not running"
+        rm -f "${PIDFILE}"
+        return 0
+    fi
+    # Only the listener is stopped; established sessions are separate processes and survive.
+    kill -TERM "${_pid}"
+    _i=0
+    while kill -0 "${_pid}" 2>/dev/null && [ ${_i} -lt 10 ]; do sleep 1; _i=$((_i + 1)); done
+    kill -0 "${_pid}" 2>/dev/null && die "sshd (pid ${_pid}) did not stop"
+    rm -f "${PIDFILE}"
+    log "stopped (open sessions are kept)"
+}
+
+do_reload() {
+    _pid=$(get_pid) || { log "not running, starting"; do_start; return; }
+    prepare
+    check
+    kill -HUP "${_pid}"
+    sleep 2
+    _new=$(get_pid) || die "sshd did not come back after reload - run: openssh-ctl start"
+    log "reloaded (pid ${_new}) - $("${SSHD}" -V 2>&1 | head -n1)"
+}
+
+do_ensure() {
+    if ! _pid=$(get_pid); then
+        log "not running, starting"
+        do_start
+        return
+    fi
+    # After a package upgrade the running binary is a deleted inode: the listener
+    # would then spawn the NEW sshd-session from an OLD sshd. Re-exec it.
+    case "$(readlink "/proc/${_pid}/exe" 2>/dev/null)" in
+        *"(deleted)") log "package upgraded, reloading onto the new binary"; do_reload ;;
+        *) : ;;
+    esac
+}
+
+do_status() {
+    if _pid=$(get_pid); then
+        echo "running (pid ${_pid})"
+        echo "binary : $(readlink "/proc/${_pid}/exe")"
+        echo "version: $("${SSHD}" -V 2>&1 | head -n1)"
+        echo "config : ${CONF}"
+        return 0
+    fi
+    echo "not running"
+    return 3
+}
+
+case "$1" in
+    start)   require_root; require_package; do_start ;;
+    stop)    require_root; do_stop ;;
+    restart) require_root; require_package; do_stop; do_start ;;
+    reload)  require_root; require_package; do_reload ;;
+    ensure)  require_root; require_package; do_ensure ;;
+    status)  require_root; do_status ;;
+    check)   require_root; require_package; prepare; check && log "configuration OK" ;;
+    version) "${SSHD}" -V 2>&1 | head -n1 ;;
+    *) echo "Usage: $0 {start|stop|restart|reload|ensure|status|check|version}"; exit 2 ;;
+esac

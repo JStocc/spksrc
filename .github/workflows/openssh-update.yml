@@ -1,0 +1,143 @@
+name: OpenSSH standalone package
+
+# Checks every day for a new OpenSSH Portable release.
+# When there is one (or when run manually with "force"):
+#   1. downloads the tarball and its PGP signature, verifies it against the pinned release key
+#   2. bumps cross/openssh (version + digests) and spk/openssh (SPK_VERS, SPK_REV)
+#   3. builds the SPK for x64 / DSM 7 with the official spksrc container
+#   4. commits the bump and publishes a GitHub Release with the .spk and its SHA256
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if the version is unchanged (bumps SPK_REV)"
+        type: boolean
+        default: false
+      arch:
+        description: "spksrc arch (x64-7.1 runs on DSM 7.1 to 7.4)"
+        type: string
+        default: "x64-7.1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: openssh-update
+  cancel-in-progress: false
+
+env:
+  OPENSSH_MIRROR: https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable
+  # Fingerprint of the OpenSSH release signing key.
+  # VERIFY IT YOURSELF before the first run (see the guide) and override it with the
+  # repository variable OPENSSH_KEY_FINGERPRINT if needed.
+  OPENSSH_KEY_FINGERPRINT: ${{ vars.OPENSSH_KEY_FINGERPRINT || '7168B983815A5EEF59A4ADFD2A3F414E736060BA' }}
+  ARCH: ${{ inputs.arch || 'x64-7.1' }}
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect latest OpenSSH Portable release
+        id: detect
+        run: |
+          set -euo pipefail
+          latest=$(curl -fsSL "${OPENSSH_MIRROR}/" \
+            | grep -oE 'openssh-[0-9]+\.[0-9]+p[0-9]+\.tar\.gz' \
+            | sed -E 's/^openssh-(.*)\.tar\.gz$/\1/' | sort -uV | tail -n1)
+          current=$(sed -nE 's/^PKG_VERS = (.*)$/\1/p' cross/openssh/Makefile)
+          [ -n "$latest" ] || { echo "could not detect latest version"; exit 1; }
+          echo "latest=$latest current=$current"
+          echo "latest=$latest"   >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          if [ "$latest" != "$current" ] || [ "${{ inputs.force }}" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Already at $current, nothing to do."
+          fi
+
+      - name: Download and verify PGP signature
+        if: steps.detect.outputs.build == 'true'
+        env:
+          V: ${{ steps.detect.outputs.latest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/openssh && cd /tmp/openssh
+          curl -fsSLO "${OPENSSH_MIRROR}/openssh-${V}.tar.gz"
+          curl -fsSLO "${OPENSSH_MIRROR}/openssh-${V}.tar.gz.asc"
+          curl -fsSL  "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/RELEASE_KEY.asc" -o RELEASE_KEY.asc
+          export GNUPGHOME=$(mktemp -d)
+          gpg --batch --import RELEASE_KEY.asc
+          # The key must be the pinned one, whatever the mirror served
+          gpg --batch --with-colons --fingerprint | grep -q "^fpr:::::::::${OPENSSH_KEY_FINGERPRINT}:" \
+            || { echo "::error::Release key fingerprint mismatch"; exit 1; }
+          gpg --batch --status-fd 1 --verify "openssh-${V}.tar.gz.asc" "openssh-${V}.tar.gz" \
+            | grep -qE "^\[GNUPG:\] VALIDSIG .*${OPENSSH_KEY_FINGERPRINT}" \
+            || { echo "::error::Bad signature for openssh-${V}.tar.gz"; exit 1; }
+          echo "Signature OK for openssh-${V}.tar.gz"
+
+      - name: Bump cross/openssh and spk/openssh
+        if: steps.detect.outputs.build == 'true'
+        env:
+          V: ${{ steps.detect.outputs.latest }}
+          CUR: ${{ steps.detect.outputs.current }}
+        run: |
+          set -euo pipefail
+          f="/tmp/openssh/openssh-${V}.tar.gz"
+          sed -i -E "s/^PKG_VERS = .*/PKG_VERS = ${V}/" cross/openssh/Makefile
+          {
+            echo "openssh-${V}.tar.gz SHA1 $(sha1sum "$f" | cut -d' ' -f1)"
+            echo "openssh-${V}.tar.gz SHA256 $(sha256sum "$f" | cut -d' ' -f1)"
+            echo "openssh-${V}.tar.gz MD5 $(md5sum "$f" | cut -d' ' -f1)"
+          } > cross/openssh/digests
+          # Make the tarball available to spksrc without downloading it again
+          mkdir -p distrib && cp "$f" distrib/
+
+          spk_vers=$(echo "$V" | sed 's/p/./')          # 10.6p2 -> 10.6.2
+          old_rev=$(sed -nE 's/^SPK_REV = (.*)$/\1/p' spk/openssh/Makefile)
+          # spksrc rule: SPK_REV is never reset, it always increments
+          rev=$((old_rev + 1))
+          sed -i -E "s/^SPK_VERS = .*/SPK_VERS = ${spk_vers}/; s/^SPK_REV = .*/SPK_REV = ${rev}/" spk/openssh/Makefile
+          sed -i -E "s|^CHANGELOG = .*|CHANGELOG = \"1. Update to OpenSSH ${V}.\"|" spk/openssh/Makefile
+          echo "SPK_FULL=${spk_vers}-${rev}" >> "$GITHUB_ENV"
+          git diff --stat
+
+      - name: Build SPK (${{ env.ARCH }})
+        if: steps.detect.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm --platform=linux/amd64 \
+            -v "$PWD":/spksrc -w /spksrc ghcr.io/synocommunity/spksrc:latest \
+            bash -c "make setup-synocommunity && make -C spk/openssh arch-${ARCH}"
+          sudo chown -R "$(id -u):$(id -g)" packages
+          ls -l packages/openssh_*.spk
+          cd packages && sha256sum openssh_*"${SPK_FULL}".spk > SHA256SUMS && cat SHA256SUMS
+
+      - name: Commit version bump
+        if: steps.detect.outputs.build == 'true'
+        env:
+          V: ${{ steps.detect.outputs.latest }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cross/openssh/Makefile cross/openssh/digests spk/openssh/Makefile
+          git commit -m "OpenSSH (standalone): Update to ${V} (spk ${SPK_FULL})" || echo "nothing to commit"
+          git push
+
+      - name: Publish GitHub Release
+        if: steps.detect.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.detect.outputs.latest }}
+        run: |
+          set -euo pipefail
+          tag="openssh-${SPK_FULL}"
+          gh release create "$tag" packages/openssh_*"${SPK_FULL}".spk packages/SHA256SUMS \
+            --title "OpenSSH ${V} for DSM 7 (${ARCH}) - spk ${SPK_FULL}" \
+            --notes "Built from the PGP-verified openssh-${V}.tar.gz. Release notes: https://www.openssh.com/releasenotes.html"
