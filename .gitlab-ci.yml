@@ -1,0 +1,148 @@
+# OpenSSH standalone package for Synology DSM 7 - GitLab CI
+#
+# Runs only from a pipeline schedule
+# (daily check) or by hand (Build > Pipelines > Run pipeline); pushes never build.
+#
+# When a new OpenSSH Portable release exists (or FORCE=true):
+#   1. downloads the tarball and its PGP signature, verifies it against the pinned key
+#   2. bumps cross/openssh (version + digests) and spk/openssh (SPK_VERS, SPK_REV)
+#   3. builds the SPK with the official spksrc image
+#   4. commits the bump, uploads the .spk to the package registry, creates a release
+#
+# Required CI/CD variable (Settings > CI/CD > Variables, masked + protected):
+#   GITLAB_PUSH_TOKEN  project access token, role Maintainer, scopes api + write_repository
+#
+# Pipeline variables you can set when running by hand:
+#   FORCE=true          rebuild even if the version is unchanged (bumps SPK_REV)
+#   ARCH=x64-7.1        spksrc arch (x64-7.1 runs on DSM 7.1 to 7.4)
+#   RUNNER_CHECK=true   only check that the runner can reach the needed sites
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - when: never
+
+variables:
+  OPENSSH_MIRROR: "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable"
+  OPENSSH_KEY_URL: "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/RELEASE_KEY.asc"
+  # Fingerprint of the OpenSSH release signing key (verified independently).
+  OPENSSH_KEY_FINGERPRINT: "7168B983815A5EEF59A4ADFD2A3F414E736060BA"
+  SPKSRC_IMAGE: "ghcr.io/synocommunity/spksrc:latest"
+  ARCH: "x64-7.1"
+  FORCE: "false"
+  RUNNER_CHECK: "false"
+  GIT_DEPTH: "50"
+
+stages:
+  - check
+  - build
+
+runner-check:
+  stage: check
+  image: $SPKSRC_IMAGE
+  rules:
+    - if: $RUNNER_CHECK == "true"
+  script:
+    - echo "Image spksrc OK (ghcr.io reachable)"
+    - curl -fsS -o /dev/null -w "cdn.openbsd.org        %{http_code}\n" "$OPENSSH_MIRROR/"
+    - curl -fsS -o /dev/null -w "synologydownload.net   %{http_code}\n" "https://global.synologydownload.net/download/ToolChain/"
+    - curl -fsS -o /dev/null -w "deb.debian.org         %{http_code}\n" "https://deb.debian.org/debian/"
+    - curl -fsS -o /dev/null -w "GitLab API             %{http_code}\n" --header "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID"
+    - '[ -n "$GITLAB_PUSH_TOKEN" ] && echo "GITLAB_PUSH_TOKEN      set" || echo "GITLAB_PUSH_TOKEN      MISSING"'
+    - echo "Runner OK"
+
+openssh-update:
+  stage: build
+  image: $SPKSRC_IMAGE
+  rules:
+    - if: $RUNNER_CHECK != "true"
+  resource_group: openssh-update
+  timeout: 3h
+  script:
+    - |
+      set -euo pipefail
+      git config --global --add safe.directory "$CI_PROJECT_DIR"
+
+      # --- 1. Detect latest release -----------------------------------------
+      latest=$(curl -fsSL "$OPENSSH_MIRROR/" \
+        | grep -oE 'openssh-[0-9]+\.[0-9]+p[0-9]+\.tar\.gz' \
+        | sed -E 's/^openssh-(.*)\.tar\.gz$/\1/' | sort -uV | tail -n1)
+      current=$(sed -nE 's/^PKG_VERS = (.*)$/\1/p' cross/openssh/Makefile)
+      [ -n "$latest" ] || { echo "could not detect latest version"; exit 1; }
+      echo "latest=$latest current=$current force=$FORCE"
+      if [ "$latest" = "$current" ] && [ "$FORCE" != "true" ]; then
+        echo "Already at $current, nothing to do."
+        exit 0
+      fi
+      V="$latest"
+
+      # --- 2. Download and verify the PGP signature -------------------------
+      apt-get update -qq && apt-get install -y -qq --no-install-recommends gnupg >/dev/null
+      mkdir -p /tmp/openssh && cd /tmp/openssh
+      curl -fsSLO "$OPENSSH_MIRROR/openssh-$V.tar.gz"
+      curl -fsSLO "$OPENSSH_MIRROR/openssh-$V.tar.gz.asc"
+      curl -fsSL "$OPENSSH_KEY_URL" -o RELEASE_KEY.asc
+      GNUPGHOME=$(mktemp -d); export GNUPGHOME
+      gpg --batch --quiet --import RELEASE_KEY.asc
+      gpg --batch --with-colons --fingerprint | grep -q "^fpr:::::::::$OPENSSH_KEY_FINGERPRINT:" \
+        || { echo "Release key fingerprint mismatch"; exit 1; }
+      gpg --batch --status-fd 1 --verify "openssh-$V.tar.gz.asc" "openssh-$V.tar.gz" \
+        | grep -qE "^\[GNUPG:\] VALIDSIG .*$OPENSSH_KEY_FINGERPRINT" \
+        || { echo "Bad signature for openssh-$V.tar.gz"; exit 1; }
+      echo "Signature OK for openssh-$V.tar.gz"
+      cd "$CI_PROJECT_DIR"
+
+      # --- 3. Bump versions -------------------------------------------------
+      f="/tmp/openssh/openssh-$V.tar.gz"
+      sed -i -E "s/^PKG_VERS = .*/PKG_VERS = $V/" cross/openssh/Makefile
+      {
+        echo "openssh-$V.tar.gz SHA1 $(sha1sum "$f" | cut -d' ' -f1)"
+        echo "openssh-$V.tar.gz SHA256 $(sha256sum "$f" | cut -d' ' -f1)"
+        echo "openssh-$V.tar.gz MD5 $(md5sum "$f" | cut -d' ' -f1)"
+      } > cross/openssh/digests
+      mkdir -p distrib && cp "$f" distrib/
+      spk_vers="${V/p/.}"
+      old_rev=$(sed -nE 's/^SPK_REV = (.*)$/\1/p' spk/openssh/Makefile)
+      rev=$((old_rev + 1))   # spksrc rule: SPK_REV always increments
+      sed -i -E "s/^SPK_VERS = .*/SPK_VERS = $spk_vers/; s/^SPK_REV = .*/SPK_REV = $rev/" spk/openssh/Makefile
+      sed -i -E "s|^CHANGELOG = .*|CHANGELOG = \"1. Update to OpenSSH $V.\"|" spk/openssh/Makefile
+      SPK_FULL="$spk_vers-$rev"
+      git --no-pager diff --stat
+
+      # --- 4. Build ---------------------------------------------------------
+      make setup-synocommunity
+      make -C spk/openssh "arch-$ARCH"
+      spk=$(ls packages/openssh_*"_$SPK_FULL.spk")
+      spk_name=$(basename "$spk")
+      (cd packages && sha256sum "$spk_name" > SHA256SUMS && cat SHA256SUMS)
+
+      # --- 5. Commit the bump -----------------------------------------------
+      git config user.name  "OpenSSH SPK CI"
+      git config user.email "openssh-spk-ci@${CI_SERVER_HOST}"
+      git add cross/openssh/Makefile cross/openssh/digests spk/openssh/Makefile
+      git commit -m "OpenSSH Standalone: Update to $V (spk $SPK_FULL)"
+      push_url="${CI_SERVER_URL/:\/\//://oauth2:${GITLAB_PUSH_TOKEN}@}/${CI_PROJECT_PATH}.git"
+      git push -o ci.skip "$push_url" "HEAD:refs/heads/$CI_DEFAULT_BRANCH"
+      sha=$(git rev-parse HEAD)
+
+      # --- 6. Package registry + release ------------------------------------
+      pkg_url="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/openssh-spk/$SPK_FULL"
+      curl -fsS --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$spk" "$pkg_url/$spk_name"
+      curl -fsS --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file packages/SHA256SUMS "$pkg_url/SHA256SUMS"
+      jq -n --arg tag "openssh-$SPK_FULL" --arg ref "$sha" \
+            --arg name "OpenSSH $V for DSM 7 ($ARCH) - spk $SPK_FULL" \
+            --arg desc "Built from the PGP-verified openssh-$V.tar.gz. Release notes: https://www.openssh.com/releasenotes.html" \
+            --arg spk_name "$spk_name" --arg spk_url "$pkg_url/$spk_name" --arg sums_url "$pkg_url/SHA256SUMS" \
+            '{tag_name:$tag, ref:$ref, name:$name, description:$desc,
+              assets:{links:[{name:$spk_name, url:$spk_url, link_type:"package"},
+                             {name:"SHA256SUMS", url:$sums_url, link_type:"other"}]}}' > /tmp/release.json
+      curl -fsS --header "PRIVATE-TOKEN: $GITLAB_PUSH_TOKEN" --header "Content-Type: application/json" \
+           --data @/tmp/release.json "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases" > /dev/null
+      echo "Release openssh-$SPK_FULL created"
+  artifacts:
+    when: on_success
+    expire_in: 30 days
+    paths:
+      - packages/openssh_*.spk
+      - packages/SHA256SUMS
