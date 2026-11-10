@@ -127,7 +127,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add cross/openssh/Makefile cross/openssh/digests spk/openssh/Makefile
-          git commit -m "OpenSSH (standalone): Update to ${V} (spk ${SPK_FULL})" || echo "nothing to commit"
+          git commit -m "OpenSSH Standalone: Update to ${V} (spk ${SPK_FULL})" || echo "nothing to commit"
           git push
 
       - name: Publish GitHub Release
