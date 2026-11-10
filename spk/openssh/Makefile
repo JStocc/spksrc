@@ -3,7 +3,7 @@ SPK_NAME = openssh
 # Bumped automatically by .github/workflows/openssh-update.yml
 # SPK_REV always increments (never reset), as required by spksrc
 SPK_VERS = 10.6.2
-SPK_REV = 4
+SPK_REV = 5
 SPK_ICON = src/openssh.png
 
 # cross/linux-pam only provides the PAM headers for the build (libs removed below)
