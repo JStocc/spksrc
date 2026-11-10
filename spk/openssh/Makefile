@@ -13,7 +13,7 @@ REQUIRED_MIN_DSM = 7.0
 UNSUPPORTED_ARCHS = $(ARMv5_ARCHS) $(OLD_PPC_ARCHS)
 
 MAINTAINER = local
-DISPLAY_NAME = OpenSSH (standalone)
+DISPLAY_NAME = OpenSSH Standalone
 DESCRIPTION = "Recent OpenSSH Portable server and client tools, installed side by side with the DSM native SSH service. Nothing from DSM is replaced: own binaries, own configuration, own host keys, own port \(2222 by default\). The server is started as root by a DSM Task Scheduler task calling openssh-ctl. See the documentation before use."
 STARTABLE = no
 CHANGELOG = "1. Standalone OpenSSH package."
