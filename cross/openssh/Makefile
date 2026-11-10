@@ -22,21 +22,32 @@ CONFIGURE_ARGS += --disable-wtmp --disable-wtmpx
 # need to disable use of system getentropy for kernels < 3.17
 CONFIGURE_ARGS += ac_cv_func_getentropy=no
 
-include ../../mk/spksrc.cross-cc.mk
-
-# Standalone OpenSSH package (spk/openssh): DSM has no "sshd" account for privilege
-# separation. Use the dedicated, unprivileged account DSM 7 creates for the package.
+# Standalone OpenSSH package (spk/openssh) only. SynoCli Network Tools is not affected.
 ifeq ($(INSTALL_PREFIX),/var/packages/openssh/target)
+# DSM has no "sshd" account: use the unprivileged account DSM 7 creates for the package.
 CONFIGURE_ARGS += --with-privsep-user=sc-openssh
-# The DSM kernel rejects seccomp filters (prctl(PR_SET_SECCOMP): Invalid argument),
-# which made every pre-auth child die. The rlimit sandbox still runs the pre-auth
-# process chrooted, unprivileged, unable to open files or fork.
-CONFIGURE_ARGS += --with-sandbox=rlimit
 # PAM: account and session checks through the DSM PAM stack (/etc/pam.d/sshd, read-only).
 # Headers come from cross/linux-pam (listed first in spk/openssh DEPENDS); at runtime
 # sshd uses the DSM /lib/libpam.so.0, the package does not ship its own libpam.
 CONFIGURE_ARGS += --with-pam
+# Sandbox: rlimit. The DSM kernel rejects the seccomp filter (prctl(PR_SET_SECCOMP):
+# Invalid argument). configure refuses rlimit on Linux because its test sets
+# RLIMIT_NOFILE to 0, which breaks poll(2); the patch below uses 1 instead (as the
+# seccomp sandbox does). So configure without sandbox, then select rlimit in config.h.
+CONFIGURE_ARGS += --with-sandbox=no
+PATCHES += patches-standalone/001-sandbox-rlimit-nofile-one.patch
+POST_CONFIGURE_TARGET = openssh_standalone_post_configure
 endif
+
+include ../../mk/spksrc.cross-cc.mk
+
+.PHONY: openssh_standalone_post_configure
+openssh_standalone_post_configure:
+	@grep -q '^#define SANDBOX_NULL 1$$' $(WORK_DIR)/$(PKG_DIR)/config.h || \
+	  { echo "ERROR: SANDBOX_NULL not found in config.h"; exit 1; }
+	sed -i 's|^#define SANDBOX_NULL 1$$|#define SANDBOX_RLIMIT 1|' $(WORK_DIR)/$(PKG_DIR)/config.h
+	@grep '^#define SANDBOX_' $(WORK_DIR)/$(PKG_DIR)/config.h
+
 
 .PHONY: openssh_post_install
 openssh_post_install:
