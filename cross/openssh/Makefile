@@ -24,6 +24,12 @@ CONFIGURE_ARGS += ac_cv_func_getentropy=no
 
 include ../../mk/spksrc.cross-cc.mk
 
+# Standalone OpenSSH package (spk/openssh): DSM has no "sshd" account for privilege
+# separation. Use the dedicated, unprivileged account DSM 7 creates for the package.
+ifeq ($(INSTALL_PREFIX),/var/packages/openssh/target)
+CONFIGURE_ARGS += --with-privsep-user=sc-openssh
+endif
+
 .PHONY: openssh_post_install
 openssh_post_install:
 	cd $(STAGING_INSTALL_PREFIX)/bin && ln -sf ssh slogin
