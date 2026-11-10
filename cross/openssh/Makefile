@@ -28,6 +28,14 @@ include ../../mk/spksrc.cross-cc.mk
 # separation. Use the dedicated, unprivileged account DSM 7 creates for the package.
 ifeq ($(INSTALL_PREFIX),/var/packages/openssh/target)
 CONFIGURE_ARGS += --with-privsep-user=sc-openssh
+# The DSM kernel rejects seccomp filters (prctl(PR_SET_SECCOMP): Invalid argument),
+# which made every pre-auth child die. The rlimit sandbox still runs the pre-auth
+# process chrooted, unprivileged, unable to open files or fork.
+CONFIGURE_ARGS += --with-sandbox=rlimit
+# PAM: account and session checks through the DSM PAM stack (/etc/pam.d/sshd, read-only).
+# Headers come from cross/linux-pam (listed first in spk/openssh DEPENDS); at runtime
+# sshd uses the DSM /lib/libpam.so.0, the package does not ship its own libpam.
+CONFIGURE_ARGS += --with-pam
 endif
 
 .PHONY: openssh_post_install

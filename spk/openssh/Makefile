@@ -6,7 +6,8 @@ SPK_VERS = 10.6.2
 SPK_REV = 4
 SPK_ICON = src/openssh.png
 
-DEPENDS = cross/openssh
+# cross/linux-pam only provides the PAM headers for the build (libs removed below)
+DEPENDS = cross/linux-pam cross/openssh
 
 # DSM 7 only: the package never runs anything as root by itself.
 REQUIRED_MIN_DSM = 7.0
@@ -35,3 +36,6 @@ openssh_extra_install:
 	install -m 755 -d $(STAGING_DIR)/bin $(STAGING_DIR)/share/openssh-spk
 	install -m 755 src/openssh-ctl $(STAGING_DIR)/bin/openssh-ctl
 	install -m 644 src/sshd_config.default $(STAGING_DIR)/share/openssh-spk/sshd_config.default
+	@# Never ship libpam: sshd must use the one from DSM (/lib/libpam.so.0)
+	rm -f $(STAGING_DIR)/lib/libpam.so* $(STAGING_DIR)/lib/libpam_misc.so* $(STAGING_DIR)/lib/libpamc.so*
+	@if ls $(STAGING_DIR)/lib/libpam* >/dev/null 2>&1; then echo "ERROR: libpam still in package"; exit 1; fi
