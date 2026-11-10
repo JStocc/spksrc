@@ -2,8 +2,8 @@ SPK_NAME = openssh
 # SPK_VERS mirrors the OpenSSH portable version: 10.6p2 -> 10.6.2
 # Bumped automatically by .github/workflows/openssh-update.yml
 # SPK_REV always increments (never reset), as required by spksrc
-SPK_VERS = 10.5.1
-SPK_REV = 1
+SPK_VERS = 10.6.2
+SPK_REV = 2
 SPK_ICON = src/openssh.png
 
 DEPENDS = cross/openssh
@@ -16,7 +16,7 @@ MAINTAINER = local
 DISPLAY_NAME = OpenSSH Standalone
 DESCRIPTION = "Recent OpenSSH Portable server and client tools, installed side by side with the DSM native SSH service. Nothing from DSM is replaced: own binaries, own configuration, own host keys, own port \(2222 by default\). The server is started as root by a DSM Task Scheduler task calling openssh-ctl. See the documentation before use."
 STARTABLE = no
-CHANGELOG = "1. Standalone OpenSSH package."
+CHANGELOG = "1. Update to OpenSSH 10.6p2."
 
 HOMEPAGE = https://www.openssh.com/
 LICENSE  = BSD-style
