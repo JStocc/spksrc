@@ -16,16 +16,17 @@ HostKey /var/packages/openssh/var/etc/ssh_host_rsa_key
 PidFile /var/run/openssh-spk.pid
 
 # --- Authentication ------------------------------------------------------
-# Public key authentication only. PAM is used for account and session checks
-# (expired/disabled DSM accounts, domain accounts, DSM logging) with the DSM
-# service file /etc/pam.d/sshd, used read-only. Its "auth" part (auto block,
-# IP block list) only applies to password logins, which are disabled here.
+# Same behaviour as the DSM native SSH service: passwords, checked by the DSM PAM
+# stack (/etc/pam.d/sshd, used read-only): auto block, smart block, IP block list,
+# expired/disabled accounts, domain accounts, DSM logging.
+# Public keys (~/.ssh/authorized_keys, needs the DSM "user home" service) also work.
+# For keys only: set PasswordAuthentication to "no".
 UsePAM yes
 # PAM service name: "sshd" (OpenSSH default), i.e. /etc/pam.d/sshd
 PermitRootLogin no
 PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
-PasswordAuthentication no
+PasswordAuthentication yes
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 # On DSM, only members of "administrators" get a login shell anyway.

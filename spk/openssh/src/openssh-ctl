@@ -63,7 +63,7 @@ prepare() {
 
     if [ ! -f "${CONF}" ]; then
         cp "${TEMPLATE}" "${CONF}" || die "cannot create ${CONF}"
-        log "created default configuration ${CONF} (port 2222, keys only)"
+        log "created default configuration ${CONF} (port 2222, password or public key)"
     fi
     chown root:root "${CONF}"
     chmod 600 "${CONF}"
