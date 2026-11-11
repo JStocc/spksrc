@@ -10,6 +10,10 @@
 #                   signature, bumps the versions, builds the SPK with the spksrc image,
 #                   commits, uploads the .spk to the package registry, creates a release.
 #
+# Runners (Settings > CI/CD > Runners), selected by tag:
+#   openssh-light   GitLab server, shell executor: daily check only
+#   openssh-build   build PC with Docker Desktop, docker executor: builds
+#
 # CI/CD variables (Settings > CI/CD > Variables):
 #   GITLAB_PUSH_TOKEN  masked + protected. Project access token, role Maintainer,
 #                      scopes api + write_repository
@@ -44,6 +48,8 @@ stages:
 
 check-openssh:
   stage: check
+  # Runner on the GitLab server (shell executor: "image" is ignored, needs curl/sed/awk)
+  tags: [openssh-light]
   image: $CHECK_IMAGE
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
@@ -89,6 +95,8 @@ check-openssh:
 
 runner-check:
   stage: check
+  # Runner on the build PC (Docker executor)
+  tags: [openssh-build]
   image: $SPKSRC_IMAGE
   rules:
     - if: $CI_PIPELINE_SOURCE == "web" && $RUNNER_CHECK == "true"
@@ -104,6 +112,8 @@ runner-check:
 
 openssh-update:
   stage: build
+  # Runner on the build PC (Docker executor): start Docker Desktop before running
+  tags: [openssh-build]
   image: $SPKSRC_IMAGE
   rules:
     - if: $CI_PIPELINE_SOURCE == "web" && $RUNNER_CHECK != "true"
