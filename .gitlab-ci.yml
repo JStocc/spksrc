@@ -183,8 +183,15 @@ openssh-update:
       git --no-pager diff --stat
 
       # --- 4. Build ---------------------------------------------------------
-      make setup-synocommunity
-      make -C spk/openssh "arch-$ARCH"
+      # The full build output exceeds the GitLab log limit (4 MiB): keep it in
+      # build.log (job artifact) and only print the end if the build fails.
+      echo "Building, full output in build.log (job artifacts)..."
+      if ! { make setup-synocommunity && make -C spk/openssh "arch-$ARCH"; } > build.log 2>&1; then
+        echo "BUILD FAILED - last 100 lines of build.log:"
+        tail -n 100 build.log
+        exit 1
+      fi
+      tail -n 5 build.log
       spk=$(ls packages/openssh_*"_$SPK_FULL.spk")
       spk_name=$(basename "$spk")
       (cd packages && sha256sum "$spk_name" > SHA256SUMS && cat SHA256SUMS)
@@ -213,8 +220,9 @@ openssh-update:
            --data @/tmp/release.json "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases" > /dev/null
       echo "Release openssh-$SPK_FULL created"
   artifacts:
-    when: on_success
+    when: always
     expire_in: 30 days
     paths:
       - packages/openssh_*.spk
       - packages/SHA256SUMS
+      - build.log
