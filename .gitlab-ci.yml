@@ -93,13 +93,14 @@ runner-check:
   rules:
     - if: $CI_PIPELINE_SOURCE == "web" && $RUNNER_CHECK == "true"
   script:
-    - echo "Image spksrc OK (ghcr.io reachable)"
-    - curl -fsS -o /dev/null -w "cdn.openbsd.org        %{http_code}\n" "$OPENSSH_MIRROR/"
-    - curl -fsS -o /dev/null -w "synologydownload.net   %{http_code}\n" "https://global.synologydownload.net/download/ToolChain/"
-    - curl -fsS -o /dev/null -w "deb.debian.org         %{http_code}\n" "https://deb.debian.org/debian/"
-    - curl -fsS -o /dev/null -w "GitLab API             %{http_code}\n" --header "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID"
-    - '[ -n "$GITLAB_PUSH_TOKEN" ] && echo "GITLAB_PUSH_TOKEN      set" || echo "GITLAB_PUSH_TOKEN      MISSING"'
-    - echo "Runner OK"
+    - |
+      echo "Image spksrc OK (ghcr.io reachable)"
+      curl -fsS -o /dev/null -w "cdn.openbsd.org        %{http_code}\n" "$OPENSSH_MIRROR/"
+      curl -fsS -o /dev/null -w "synologydownload.net   %{http_code}\n" "https://global.synologydownload.net/download/ToolChain/"
+      curl -fsS -o /dev/null -w "deb.debian.org         %{http_code}\n" "https://deb.debian.org/debian/"
+      curl -fsS -o /dev/null -w "GitLab API             %{http_code}\n" --header "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID"
+      if [ -n "${GITLAB_PUSH_TOKEN:-}" ]; then echo "GITLAB_PUSH_TOKEN      set"; else echo "GITLAB_PUSH_TOKEN      MISSING"; fi
+      echo "Runner OK"
 
 openssh-update:
   stage: build
