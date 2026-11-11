@@ -1,18 +1,21 @@
 # OpenSSH standalone package for Synology DSM 7 - GitLab CI
 #
-# Runs only from a pipeline schedule
-# (daily check) or by hand (Build > Pipelines > Run pipeline); pushes never build.
+# Two separate jobs, so the (small) GitLab server never compiles on its own:
 #
-# When a new OpenSSH Portable release exists (or FORCE=true):
-#   1. downloads the tarball and its PGP signature, verifies it against the pinned key
-#   2. bumps cross/openssh (version + digests) and spk/openssh (SPK_VERS, SPK_REV)
-#   3. builds the SPK with the official spksrc image
-#   4. commits the bump, uploads the .spk to the package registry, creates a release
+#   check-openssh   pipeline schedule (daily). Light: small curl image, a few HTTP
+#                   requests. If a newer OpenSSH Portable release exists, opens a GitLab
+#                   issue (once per version) that mentions ALERT_MENTION.
 #
-# Required CI/CD variable (Settings > CI/CD > Variables, masked + protected):
-#   GITLAB_PUSH_TOKEN  project access token, role Maintainer, scopes api + write_repository
+#   openssh-update  manual only (Build > Pipelines > Run pipeline). Verifies the PGP
+#                   signature, bumps the versions, builds the SPK with the spksrc image,
+#                   commits, uploads the .spk to the package registry, creates a release.
 #
-# Pipeline variables you can set when running by hand:
+# CI/CD variables (Settings > CI/CD > Variables):
+#   GITLAB_PUSH_TOKEN  masked + protected. Project access token, role Maintainer,
+#                      scopes api + write_repository
+#   ALERT_MENTION      people to notify in the issue, e.g. "@jdoe @asmith"
+#
+# Variables you can set when running a pipeline by hand:
 #   FORCE=true          rebuild even if the version is unchanged (bumps SPK_REV)
 #   ARCH=x64-7.1        spksrc arch (x64-7.1 runs on DSM 7.1 to 7.4)
 #   RUNNER_CHECK=true   only check that the runner can reach the needed sites
@@ -29,6 +32,7 @@ variables:
   # Fingerprint of the OpenSSH release signing key (verified independently).
   OPENSSH_KEY_FINGERPRINT: "7168B983815A5EEF59A4ADFD2A3F414E736060BA"
   SPKSRC_IMAGE: "ghcr.io/synocommunity/spksrc:latest"
+  CHECK_IMAGE: "curlimages/curl:latest"
   ARCH: "x64-7.1"
   FORCE: "false"
   RUNNER_CHECK: "false"
@@ -38,11 +42,56 @@ stages:
   - check
   - build
 
+check-openssh:
+  stage: check
+  image: $CHECK_IMAGE
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  variables:
+    GIT_DEPTH: "1"
+  script:
+    - |
+      set -eu
+      # Version sort without "sort -V" (BusyBox): 10.6p2 -> 00010 00006 00002
+      vsort() { awk -F'[.p]' '{ printf "%05d%05d%05d %s\n", $1, $2, $3, $0 }' | sort | tail -n1 | cut -d' ' -f2; }
+      latest=$(curl -fsSL "$OPENSSH_MIRROR/" \
+        | grep -oE 'openssh-[0-9]+\.[0-9]+p[0-9]+\.tar\.gz' \
+        | sed -E 's/^openssh-(.*)\.tar\.gz$/\1/' | vsort)
+      current=$(sed -nE 's/^PKG_VERS = (.*)$/\1/p' cross/openssh/Makefile)
+      [ -n "$latest" ] || { echo "could not detect latest version"; exit 1; }
+      echo "latest=$latest packaged=$current"
+      newest=$(printf '%s\n%s\n' "$current" "$latest" | vsort)
+      if [ "$latest" = "$current" ] || [ "$newest" != "$latest" ]; then
+        echo "Up to date."
+        exit 0
+      fi
+      title="Nouvelle version OpenSSH : $latest"
+      api="$CI_API_V4_URL/projects/$CI_PROJECT_ID/issues"
+      if curl -fsS --header "PRIVATE-TOKEN: $GITLAB_PUSH_TOKEN" -G "$api" \
+           --data-urlencode "state=opened" --data-urlencode "in=title" \
+           --data-urlencode "search=$latest" | grep -qF "\"$title\""; then
+        echo "Issue already open for $latest."
+        exit 0
+      fi
+      desc="OpenSSH **$latest** est disponible (paquet actuel : **$current**).
+
+      - Notes de version : https://www.openssh.com/releasenotes.html
+      - Pour compiler : Build > Pipelines > **Run pipeline** sur \`$CI_DEFAULT_BRANCH\` (aucune variable nécessaire).
+      - Ensuite : Deploy > Releases, télécharger le .spk et l'installer sur le NAS (Installation manuelle).
+
+      Fermer cette issue une fois le paquet installé.
+
+      ${ALERT_MENTION:-}"
+      curl -fsS --header "PRIVATE-TOKEN: $GITLAB_PUSH_TOKEN" "$api" \
+           --data-urlencode "title=$title" --data-urlencode "description=$desc" \
+           --data-urlencode "labels=openssh-update" > /dev/null
+      echo "Issue created: $title"
+
 runner-check:
   stage: check
   image: $SPKSRC_IMAGE
   rules:
-    - if: $RUNNER_CHECK == "true"
+    - if: $CI_PIPELINE_SOURCE == "web" && $RUNNER_CHECK == "true"
   script:
     - echo "Image spksrc OK (ghcr.io reachable)"
     - curl -fsS -o /dev/null -w "cdn.openbsd.org        %{http_code}\n" "$OPENSSH_MIRROR/"
@@ -56,7 +105,7 @@ openssh-update:
   stage: build
   image: $SPKSRC_IMAGE
   rules:
-    - if: $RUNNER_CHECK != "true"
+    - if: $CI_PIPELINE_SOURCE == "web" && $RUNNER_CHECK != "true"
   resource_group: openssh-update
   timeout: 3h
   script:
