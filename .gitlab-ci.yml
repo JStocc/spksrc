@@ -103,12 +103,19 @@ runner-check:
   script:
     - |
       echo "Image spksrc OK (ghcr.io reachable)"
-      curl -fsS -o /dev/null -w "cdn.openbsd.org        %{http_code}\n" "$OPENSSH_MIRROR/"
-      curl -fsS -o /dev/null -w "synologydownload.net   %{http_code}\n" "https://global.synologydownload.net/download/ToolChain/"
-      curl -fsS -o /dev/null -w "deb.debian.org         %{http_code}\n" "https://deb.debian.org/debian/"
-      curl -fsS -o /dev/null -w "GitLab API             %{http_code}\n" --header "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID"
-      if [ -n "${GITLAB_PUSH_TOKEN:-}" ]; then echo "GITLAB_PUSH_TOKEN      set"; else echo "GITLAB_PUSH_TOKEN      MISSING"; fi
-      echo "Runner OK"
+      failed=0
+      check() {  # name url [curl options]: prints the HTTP code, never stops the job
+        name=$1; url=$2; shift 2
+        code=$(curl -sS -o /dev/null -I -L -w "%{http_code}" "$@" "$url" 2>/tmp/curl.err) || code="ERR $(cat /tmp/curl.err)"
+        printf '%-22s %s\n' "$name" "$code"
+        case "$code" in 2*|3*) ;; *) failed=1 ;; esac
+      }
+      check "cdn.openbsd.org"      "$OPENSSH_MIRROR/"
+      check "Synology toolchain"   "https://global.synologydownload.com/download/ToolChain/toolchain/7.1-42661/Intel%20x86%20Linux%204.4.180%20%28Apollolake%29/apollolake-gcc850_glibc226_x86_64-GPL.txz"
+      check "deb.debian.org"       "https://deb.debian.org/debian/"
+      check "GitLab API"           "$CI_API_V4_URL/projects/$CI_PROJECT_ID" --header "JOB-TOKEN: $CI_JOB_TOKEN"
+      if [ -n "${GITLAB_PUSH_TOKEN:-}" ]; then echo "GITLAB_PUSH_TOKEN      set"; else echo "GITLAB_PUSH_TOKEN      MISSING"; failed=1; fi
+      if [ "$failed" = 0 ]; then echo "Runner OK"; else echo "Runner NOT ready"; exit 1; fi
 
 openssh-update:
   stage: build
